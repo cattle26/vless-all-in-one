@@ -1,8 +1,8 @@
-# Sing-box V2Ray API custom build
+# Sing-box with_v2ray_api custom build
 
 This release includes a custom **Sing-box** binary with `with_v2ray_api` enabled.
 
-Current custom version string: **zyx0rx-v2api1-a11cd1e**
+Current custom version string: **zyx0rx-with-v2ray-api1-a11cd1e**
 
 It is required for **Sing-box user traffic statistics** in `vless-all-in-one` v3.5.2, including:
 
@@ -24,7 +24,7 @@ On the target server:
 
 ```bash
 systemctl stop vless-singbox 2>/dev/null || true
-cp -f sing-box-zyx0rx-v2api-linux-amd64 /usr/local/bin/sing-box
+cp -f sing-box-zyx0rx-with-v2ray-api-linux-amd64 /usr/local/bin/sing-box
 chmod +x /usr/local/bin/sing-box
 /usr/local/bin/sing-box version
 systemctl restart vless-singbox

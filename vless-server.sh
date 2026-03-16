@@ -8657,6 +8657,206 @@ update_core_menu() {
     done
 }
 
+_singbox_ruleset_path() {
+    local tag="$1"
+    echo "$CFG/ruleset/${tag}.srs"
+}
+
+_singbox_ruleset_source_path() {
+    local tag="$1"
+    echo "$CFG/ruleset-src/${tag}.json"
+}
+
+_build_singbox_geosite_ruleset() {
+    local tag="$1"
+    local source_path=$(_singbox_ruleset_source_path "$tag")
+    local output_path=$(_singbox_ruleset_path "$tag")
+    local roots=""
+
+    case "$tag" in
+        geosite-tracker) roots="category-public-tracker category-pt" ;;
+        geosite-*) roots="${tag#geosite-}" ;;
+        *) return 1 ;;
+    esac
+
+    mkdir -p "$CFG/ruleset" "$CFG/ruleset-src"
+
+    python3 - "$source_path" $roots <<'PY'
+import json, sys, urllib.request
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+roots = sys.argv[2:]
+base = 'https://raw.githubusercontent.com/v2fly/domain-list-community/master/data/{}'
+seen = set()
+full = set()
+suffix = set()
+keyword = set()
+regex = set()
+
+
+def fetch(name: str) -> str:
+    with urllib.request.urlopen(base.format(name), timeout=30) as resp:
+        return resp.read().decode('utf-8', 'ignore')
+
+
+def norm_token(token: str) -> str:
+    token = token.strip()
+    if '@' in token:
+        token = token.split('@', 1)[0].strip()
+    if ' ' in token:
+        token = token.split()[0].strip()
+    return token.strip()
+
+
+def load(name: str):
+    if not name or name in seen:
+        return
+    seen.add(name)
+    text = fetch(name)
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith('#'):
+            continue
+        if '# ' in line:
+            line = line.split('#', 1)[0].strip()
+        line = norm_token(line)
+        if not line:
+            continue
+        if line.startswith('include:'):
+            load(norm_token(line.split(':', 1)[1]))
+        elif line.startswith('full:'):
+            v = norm_token(line.split(':', 1)[1])
+            if v:
+                full.add(v)
+        elif line.startswith('regexp:'):
+            v = line.split(':', 1)[1].strip()
+            if v:
+                regex.add(v)
+        elif line.startswith('keyword:'):
+            v = norm_token(line.split(':', 1)[1])
+            if v:
+                keyword.add(v)
+        elif line.startswith('domain:'):
+            v = norm_token(line.split(':', 1)[1]).lstrip('.')
+            if v:
+                suffix.add(v)
+        elif line.startswith('exclude:'):
+            continue
+        else:
+            v = norm_token(line).lstrip('.')
+            if v:
+                suffix.add(v)
+
+for item in roots:
+    load(item)
+
+rule = {}
+if full:
+    rule['domain'] = sorted(full)
+if suffix:
+    rule['domain_suffix'] = sorted(suffix)
+if keyword:
+    rule['domain_keyword'] = sorted(keyword)
+if regex:
+    rule['domain_regex'] = sorted(regex)
+
+out = {'version': 3, 'rules': [rule] if rule else []}
+out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+PY
+
+    sing-box rule-set compile "$source_path" -o "$output_path" >/dev/null 2>&1
+}
+
+_build_singbox_geoip_ruleset() {
+    local tag="$1"
+    local source_path=$(_singbox_ruleset_source_path "$tag")
+    local output_path=$(_singbox_ruleset_path "$tag")
+    local name=""
+
+    case "$tag" in
+        geoip-*) name="${tag#geoip-}" ;;
+        *) return 1 ;;
+    esac
+
+    mkdir -p "$CFG/ruleset" "$CFG/ruleset-src"
+
+    python3 - "$source_path" "$name" <<'PY'
+import json, sys, urllib.request
+from pathlib import Path
+
+out_path = Path(sys.argv[1])
+name = sys.argv[2]
+urls = [
+    f'https://raw.githubusercontent.com/Loyalsoldier/geoip/release/text/{name}.txt',
+]
+text = None
+for url in urls:
+    try:
+        with urllib.request.urlopen(url, timeout=30) as resp:
+            text = resp.read().decode('utf-8', 'ignore')
+            break
+    except Exception:
+        continue
+if text is None:
+    raise SystemExit(f'failed to fetch geoip source for {name}')
+ips = []
+for raw in text.splitlines():
+    line = raw.strip()
+    if not line or line.startswith('#'):
+        continue
+    ips.append(line)
+out = {'version': 3, 'rules': [{'ip_cidr': ips}] if ips else []}
+out_path.write_text(json.dumps(out, ensure_ascii=False, indent=2))
+PY
+
+    sing-box rule-set compile "$source_path" -o "$output_path" >/dev/null 2>&1
+}
+
+_build_singbox_ruleset() {
+    local tag="$1"
+    case "$tag" in
+        geosite-*) _build_singbox_geosite_ruleset "$tag" ;;
+        geoip-*) _build_singbox_geoip_ruleset "$tag" ;;
+        *) return 1 ;;
+    esac
+}
+
+_ensure_singbox_rulesets_from_routing_rules() {
+    local routing_rules="$1"
+    [[ -z "$routing_rules" || "$routing_rules" == "[]" ]] && return 0
+
+    local tags=$(echo "$routing_rules" | jq -r '.[]? | .rule_set[]?' 2>/dev/null | sort -u)
+    [[ -z "$tags" ]] && return 0
+
+    local tag
+    for tag in $tags; do
+        local path=$(_singbox_ruleset_path "$tag")
+        if [[ ! -s "$path" ]]; then
+            _build_singbox_ruleset "$tag" || {
+                _err "生成 Sing-box 规则集失败: $tag"
+                return 1
+            }
+        fi
+    done
+}
+
+_build_singbox_ruleset_defs() {
+    local routing_rules="$1"
+    [[ -z "$routing_rules" || "$routing_rules" == "[]" ]] && { echo "[]"; return 0; }
+
+    local defs="[]"
+    local tags=$(echo "$routing_rules" | jq -r '.[]? | .rule_set[]?' 2>/dev/null | sort -u)
+    [[ -z "$tags" ]] && { echo "[]"; return 0; }
+
+    local tag
+    for tag in $tags; do
+        local path=$(_singbox_ruleset_path "$tag")
+        defs=$(echo "$defs" | jq --arg tag "$tag" --arg path "$path" '. + [{type: "local", tag: $tag, format: "binary", path: $path}]')
+    done
+    echo "$defs"
+}
+
 # 生成 Sing-box 统一配置 (Hy2 + TUIC 共用一个进程)
 generate_singbox_config() {
     local singbox_protocols=$(db_list_protocols "singbox")
@@ -8713,6 +8913,7 @@ generate_singbox_config() {
     # 收集所有需要的出口
     local outbounds=$(jq -n --argjson direct "$direct_outbound" '[$direct, {type: "block", tag: "block"}]')
     local routing_rules=""
+    local singbox_ruleset_defs="[]"
     local has_routing=false
     local warp_has_endpoint=false
     local warp_endpoint_data=""
@@ -8927,6 +9128,8 @@ generate_singbox_config() {
             if [[ "$warp_has_endpoint" == "true" ]]; then
                 routing_rules=$(echo "$routing_rules" | jq 'map(if ((.outbound // "") | startswith("warp")) then .outbound = "warp" else . end)')
             fi
+            _ensure_singbox_rulesets_from_routing_rules "$routing_rules" || return 1
+            singbox_ruleset_defs=$(_build_singbox_ruleset_defs "$routing_rules")
             has_routing=true
         fi
         
@@ -9011,6 +9214,9 @@ generate_singbox_config() {
         # 添加路由规则
         if [[ -n "$routing_rules" && "$routing_rules" != "[]" ]]; then
             base_config=$(echo "$base_config" | jq --argjson rules "$routing_rules" '.route.rules = $rules')
+        fi
+        if [[ -n "$singbox_ruleset_defs" && "$singbox_ruleset_defs" != "[]" ]]; then
+            base_config=$(echo "$base_config" | jq --argjson sets "$singbox_ruleset_defs" '.route.rule_set = $sets')
         fi
     else
         base_config=$(jq -n --argjson direct "$direct_outbound" '{

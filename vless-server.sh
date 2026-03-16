@@ -13148,12 +13148,12 @@ test_routing() {
 
 # 访问限制预设
 ACCESS_RESTRICT_CN_DOMAINS="geosite:cn,geoip:cn"
-ACCESS_RESTRICT_BTPT_DOMAINS="geosite:tracker,geosite:public-tracker,geosite:private-tracker"
+ACCESS_RESTRICT_BTPT_DOMAINS="geosite:tracker"
 
 access_restriction_enabled() {
     [[ ! -f "$DB_FILE" ]] && return 1
     local count
-    count=$(jq '[.routing_rules[]? | select(.id == "restrict-cn-geosite" or .id == "restrict-cn-geoip" or .id == "restrict-btpt-tracker" or .id == "restrict-btpt-public-tracker" or .id == "restrict-btpt-private-tracker" or .type == "restrict-cn" or .type == "restrict-btpt")] | length' "$DB_FILE" 2>/dev/null)
+    count=$(jq '[.routing_rules[]? | select(.id == "restrict-cn-geosite" or .id == "restrict-cn-geoip" or .id == "restrict-btpt-tracker" or .type == "restrict-cn" or .type == "restrict-btpt")] | length' "$DB_FILE" 2>/dev/null)
     [[ "${count:-0}" -gt 0 ]]
 }
 
@@ -13170,8 +13170,6 @@ cleanup_legacy_access_restriction_rules() {
         .id != "restrict-cn-geosite" and
         .id != "restrict-cn-geoip" and
         .id != "restrict-btpt-tracker" and
-        .id != "restrict-btpt-public-tracker" and
-        .id != "restrict-btpt-private-tracker" and
         .id != "restrict-btpt-trackers" and
         .id != "restrict-btpt-pt" and
         .type != "restrict-cn" and
@@ -13202,12 +13200,12 @@ show_access_restriction_status() {
     local rules=$(db_get_routing_rules)
     local cn_enabled="否" bt_enabled="否"
     echo "$rules" | jq -e '.[] | select(.id == "restrict-cn-geosite" or .id == "restrict-cn-geoip" or .type == "restrict-cn")' >/dev/null 2>&1 && cn_enabled="是"
-    echo "$rules" | jq -e '.[] | select(.id == "restrict-btpt-tracker" or .id == "restrict-btpt-public-tracker" or .id == "restrict-btpt-private-tracker" or .type == "restrict-btpt")' >/dev/null 2>&1 && bt_enabled="是"
+    echo "$rules" | jq -e '.[] | select(.id == "restrict-btpt-tracker" or .type == "restrict-btpt")' >/dev/null 2>&1 && bt_enabled="是"
     echo -e "  禁止回国: ${G}${cn_enabled}${NC}"
     echo -e "  禁止 BT/PT: ${G}${bt_enabled}${NC}"
     echo ""
     echo -e "  ${D}当前预设规则:${NC}"
-    echo "$rules" | jq -r '.[] | select(.id == "restrict-cn-geosite" or .id == "restrict-cn-geoip" or .id == "restrict-btpt-tracker" or .id == "restrict-btpt-public-tracker" or .id == "restrict-btpt-private-tracker" or .type == "restrict-cn" or .type == "restrict-btpt") | "  • " + (.id // .type) + " -> " + .outbound + " (" + (.domains // "") + ")"' 2>/dev/null || true
+    echo "$rules" | jq -r '.[] | select(.id == "restrict-cn-geosite" or .id == "restrict-cn-geoip" or .id == "restrict-btpt-tracker" or .type == "restrict-cn" or .type == "restrict-btpt") | "  • " + (.id // .type) + " -> " + .outbound + " (" + (.domains // "") + ")"' 2>/dev/null || true
     _line
     read -rp "  按回车返回... " _
 }
@@ -13218,7 +13216,7 @@ enable_access_restriction() {
     _line
     echo -e "  ${D}将写入以下预设拦截规则:${NC}"
     echo -e "  • geosite:cn / geoip:cn -> block"
-    echo -e "  • BT/PT 相关域名与协议关键字 -> block"
+    echo -e "  • BT/PT tracker 域名 -> block"
     echo ""
     read -rp "  确认启用? [Y/n]: " confirm
     [[ "$confirm" =~ ^[nN]$ ]] && return 0
@@ -13256,30 +13254,6 @@ d=json.loads(p.read_text())
 for r in d.get('routing_rules',[]):
     if r.get('domains')=='geosite:tracker' and r.get('outbound')=='block':
         r['id']='restrict-btpt-tracker'
-        break
-p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
-PY2
-    db_add_routing_rule "custom" "block" "geosite:public-tracker" "as_is"
-    python3 - "$DB_FILE" <<'PY2'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-d=json.loads(p.read_text())
-for r in d.get('routing_rules',[]):
-    if r.get('domains')=='geosite:public-tracker' and r.get('outbound')=='block':
-        r['id']='restrict-btpt-public-tracker'
-        break
-p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
-PY2
-    db_add_routing_rule "custom" "block" "geosite:private-tracker" "as_is"
-    python3 - "$DB_FILE" <<'PY2'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-d=json.loads(p.read_text())
-for r in d.get('routing_rules',[]):
-    if r.get('domains')=='geosite:private-tracker' and r.get('outbound')=='block':
-        r['id']='restrict-btpt-private-tracker'
         break
 p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
 PY2

@@ -1,6 +1,6 @@
 #!/bin/bash 
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.1 [服务端]
+#  多协议代理一键部署脚本 v3.5.2 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Zyx0rx/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.1"
+readonly VERSION="3.5.2"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/Zyx0rx/vless-all-in-one"
 readonly SCRIPT_REPO="Zyx0rx/vless-all-in-one"
@@ -1820,6 +1820,103 @@ singbox_stats_available() {
     return 0
 }
 
+# 确保 Sing-box 协议的默认用户落入 users[]，便于统计 / 限额 / 到期统一处理
+_ensure_singbox_default_users() {
+    [[ ! -f "$DB_FILE" ]] && return 0
+    local today
+    today=$(date +%F)
+
+    python3 - "$DB_FILE" "$today" <<'PY'
+import json, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+today = sys.argv[2]
+
+data = json.loads(path.read_text())
+changed = [False]
+singbox = data.get('singbox') or {}
+
+for proto in ('hy2', 'tuic', 'anytls'):
+    cfg = singbox.get(proto)
+    if cfg is None:
+        continue
+
+    def default_secret(obj):
+        if proto == 'tuic':
+            return obj.get('uuid') or ''
+        return obj.get('password') or obj.get('username') or obj.get('uuid') or ''
+
+    def normalize_obj(obj):
+        if not isinstance(obj, dict):
+            return obj
+
+        secret = default_secret(obj)
+        if not secret:
+            return obj
+
+        users = obj.get('users')
+        if not isinstance(users, list):
+            users = []
+
+        default_user = None
+        for user in users:
+            if isinstance(user, dict) and user.get('name') == 'default':
+                default_user = user
+                break
+
+        if default_user is None:
+            users.insert(0, {
+                'name': 'default',
+                'uuid': secret,
+                'quota': 0,
+                'used': 0,
+                'enabled': True,
+                'created': today,
+                'expire_date': ''
+            })
+            obj['users'] = users
+            changed[0] = True
+        else:
+            if not default_user.get('uuid'):
+                default_user['uuid'] = secret
+                changed[0] = True
+            if 'quota' not in default_user:
+                default_user['quota'] = 0
+                changed[0] = True
+            if 'used' not in default_user:
+                default_user['used'] = 0
+                changed[0] = True
+            if 'enabled' not in default_user:
+                default_user['enabled'] = True
+                changed[0] = True
+            if 'created' not in default_user or not default_user.get('created'):
+                default_user['created'] = today
+                changed[0] = True
+            if 'expire_date' not in default_user:
+                default_user['expire_date'] = ''
+                changed[0] = True
+            obj['users'] = users
+
+        return obj
+
+    if isinstance(cfg, list):
+        singbox[proto] = [normalize_obj(item) for item in cfg]
+    else:
+        singbox[proto] = normalize_obj(cfg)
+
+if changed[0]:
+    data['singbox'] = singbox
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+PY
+}
+
+# 生成 Sing-box 用户的内部统计键，避免不同协议同名用户（如 default）互相撞统计
+_singbox_stat_key_for_user() {
+    local proto="$1" name="$2"
+    printf '%s-%s' "$proto" "$name"
+}
+
 # 获取 Sing-box 协议的“展示用户名 -> stats 用户键”映射
 # 输出格式: name|stat_key
 _get_singbox_stat_user_mappings() {
@@ -1828,20 +1925,13 @@ _get_singbox_stat_user_mappings() {
 
     jq -r --arg p "$proto" '
         .singbox[$p] as $cfg |
+        def stat_key($name): ($p + "-" + $name);
         def to_items($obj):
             if ($obj == null) then []
             elif (($obj.users // []) | length) > 0 then
-                if $p == "tuic" then
-                    [ $obj.users[] | select((.name // "") != "" and (.uuid // "") != "") | {name: .name, stat: .uuid} ]
-                else
-                    [ $obj.users[] | select((.name // "") != "") | {name: .name, stat: .name} ]
-                end
+                [ $obj.users[] | select((.name // "") != "") | {name: .name, stat: stat_key(.name)} ]
             elif ($obj.uuid != null or $obj.password != null or $obj.username != null) then
-                if $p == "tuic" then
-                    [{name: "default", stat: ($obj.uuid // "")}]
-                else
-                    [{name: "default", stat: "default"}]
-                end
+                [{name: "default", stat: stat_key("default")}]
             else
                 []
             end;
@@ -1895,6 +1985,7 @@ sync_all_user_traffic() {
     local reset="${1:-true}"  # 默认重置计数器
     
     [[ ! -f "$DB_FILE" ]] && return 1
+    _ensure_singbox_default_users
     
     # 月重置（仅重置数据库累计值，不影响实时计数器）
     check_monthly_traffic_reset
@@ -2066,6 +2157,7 @@ sync_all_user_traffic() {
 # 支持 Xray + Sing-box（当前已接入 HY2 / TUIC / AnyTLS 的用户级统计）
 get_all_traffic_stats() {
     [[ ! -f "$DB_FILE" ]] && return 1
+    _ensure_singbox_default_users
 
     # 使用临时文件存储，避免大变量导致内存问题
     local tmp_stats=$(mktemp)
@@ -8925,6 +9017,7 @@ _build_singbox_ruleset_defs() {
 
 # 生成 Sing-box 统一配置 (Hy2 + TUIC 共用一个进程)
 generate_singbox_config() {
+    _ensure_singbox_default_users
     local singbox_protocols=$(db_list_protocols "singbox")
     [[ -z "$singbox_protocols" ]] && return 1
     
@@ -9339,12 +9432,12 @@ generate_singbox_config() {
                 
                 if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
                     # 有自定义用户，为每个用户生成 {name, password}
-                    # hy2 用户的 uuid 字段存储的是密码
-                    local default_user_json=$(jq -n --arg pw "$password" '{name: "default", password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: .name, password: .uuid}))) | unique_by(.name)')
+                    # hy2 用户的 uuid 字段存储的是密码；name 使用协议隔离后的内部统计键
+                    local default_user_json=$(jq -n --arg name "hy2-default" --arg pw "$password" '{name: $name, password: $pw}')
+                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: ("hy2-" + .name), password: .uuid}))) | unique_by(.name)')
                 else
                     # 没有自定义用户，使用默认密码
-                    users_json=$(jq -n --arg pw "$password" '[{name: "default", password: $pw}]')
+                    users_json=$(jq -n --arg name "hy2-default" --arg pw "$password" '[{name: $name, password: $pw}]')
                 fi
                 
                 inbound=$(jq -n \
@@ -9391,11 +9484,11 @@ generate_singbox_config() {
                 ' "$DB_FILE" 2>/dev/null)
                 
                 if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
-                    # TUIC 用户的 uuid 字段存储的是真正用户 UUID；password 复用协议主密码
-                    local default_user_json=$(jq -n --arg id "$uuid" --arg pw "$password" '{uuid: $id, password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" --arg pw "$password" '([$chk_def] + ($db_users | map({uuid: .uuid, password: $pw}))) | unique_by(.uuid)')
+                    # TUIC 用户的 uuid 字段存储的是真正用户 UUID；name 使用协议隔离后的内部统计键
+                    local default_user_json=$(jq -n --arg name "tuic-default" --arg id "$uuid" --arg pw "$password" '{name: $name, uuid: $id, password: $pw}')
+                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" --arg pw "$password" '([$chk_def] + ($db_users | map({name: ("tuic-" + .name), uuid: .uuid, password: $pw}))) | unique_by(.name)')
                 else
-                    users_json=$(jq -n --arg id "$uuid" --arg pw "$password" '[{uuid: $id, password: $pw}]')
+                    users_json=$(jq -n --arg name "tuic-default" --arg id "$uuid" --arg pw "$password" '[{name: $name, uuid: $id, password: $pw}]')
                 fi
                 
                 inbound=$(jq -n \
@@ -9439,11 +9532,11 @@ generate_singbox_config() {
                 ' "$DB_FILE" 2>/dev/null)
 
                 if [[ -n "$db_users" && "$db_users" != "[]" && "$db_users" != "null" ]]; then
-                    # AnyTLS 用户的 uuid 字段存储的是真正用户密码
-                    local default_user_json=$(jq -n --arg pw "$password" '{name: "default", password: $pw}')
-                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: .name, password: .uuid}))) | unique_by(.name)')
+                    # AnyTLS 用户的 uuid 字段存储的是真正用户密码；name 使用协议隔离后的内部统计键
+                    local default_user_json=$(jq -n --arg name "anytls-default" --arg pw "$password" '{name: $name, password: $pw}')
+                    users_json=$(jq -n --argjson db_users "$db_users" --argjson chk_def "$default_user_json" '([$chk_def] + ($db_users | map({name: ("anytls-" + .name), password: .uuid}))) | unique_by(.name)')
                 else
-                    users_json=$(jq -n --arg pw "$password" '[{name: "default", password: $pw}]')
+                    users_json=$(jq -n --arg name "anytls-default" --arg pw "$password" '[{name: $name, password: $pw}]')
                 fi
 
                 inbound=$(jq -n \
@@ -9556,9 +9649,10 @@ generate_singbox_config() {
                     ;;
             esac
             
-            # 添加路由规则
+            # 添加路由规则（Sing-box 实际匹配的是内部统计键用户名）
+            local stat_user=$(_singbox_stat_key_for_user "$proto" "$uname")
             user_routing_rules=$(echo "$user_routing_rules" | jq \
-                --arg user "$uname" \
+                --arg user "$stat_user" \
                 --arg outbound "$outbound_name" \
                 '. + [{auth_user: [$user], outbound: $outbound}]')
         done <<< "$db_users"
@@ -9579,7 +9673,7 @@ generate_singbox_config() {
     fi
     
     # 收集可统计的 sing-box 用户标识，用于 V2Ray API 用户级流量统计
-    # HY2 / AnyTLS 使用用户名；TUIC 使用 UUID
+    # HY2 / TUIC / AnyTLS 均使用用户名
     local stats_users="[]"
     for proto in hy2 tuic anytls; do
         local mappings=$(_get_singbox_stat_user_mappings "$proto")

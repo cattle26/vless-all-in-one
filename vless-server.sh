@@ -3416,7 +3416,7 @@ generate_xray_config() {
         return 1
     fi
     
-    # 最终净化访问限制规则（防止历史/兼容逻辑把 tracker 扩成当前环境不支持的 private/public-tracker）
+    # 最终净化访问限制规则（强制只保留最小可用集，避免任何旧兼容逻辑污染）
     if [[ -f "$CFG/config.json" ]]; then
         local tmp=$(mktemp)
         if jq '
@@ -3425,7 +3425,11 @@ generate_xray_config() {
                     .routing.rules[] |
                     select(
                         (.domain == null) or
-                        ((.domain | index("geosite:private-tracker")) == null and (.domain | index("geosite:public-tracker")) == null)
+                        (
+                            (.domain | index("geosite:private-tracker")) == null and
+                            (.domain | index("geosite:public-tracker")) == null and
+                            (.domain | index("geosite:category-pt")) == null
+                        )
                     )
                 ]
             else . end
@@ -13166,7 +13170,9 @@ test_routing() {
     return 0
 }
 
-# 访问限制预设
+# 访问限制预设（最小可用集）
+# Xray: 仅使用当前环境稳定可用的 geosite/geaip 规则
+# Sing-box: 通过同名逻辑映射为 geosite-cn / geoip-cn / geosite-tracker
 ACCESS_RESTRICT_CN_DOMAINS="geosite:cn,geoip:cn"
 ACCESS_RESTRICT_BTPT_DOMAINS="geosite:tracker"
 
@@ -13234,14 +13240,25 @@ enable_access_restriction() {
     _header
     echo -e "  ${W}启用回国 / BT/PT 限制${NC}"
     _line
-    echo -e "  ${D}将写入以下预设拦截规则:${NC}"
-    echo -e "  • geosite:cn / geoip:cn -> block"
-    echo -e "  • BT/PT tracker 域名 -> block"
+    echo -e "  ${D}将写入以下最小可用拦截规则:${NC}"
+    echo -e "  • geosite:cn -> block"
+    echo -e "  • geoip:cn -> block"
+    echo -e "  • geosite:tracker -> block"
     echo ""
     read -rp "  确认启用? [Y/n]: " confirm
     [[ "$confirm" =~ ^[nN]$ ]] && return 0
+
+    # 先全量清理旧访问限制，避免残留/叠加
+    db_del_routing_rule "restrict-cn" "by_type"
+    db_del_routing_rule "restrict-btpt" "by_type"
     cleanup_legacy_access_restriction_rules
+
+    # 重新写入一套干净的最小规则集
     db_add_routing_rule "custom" "block" "geosite:cn" "as_is"
+    db_add_routing_rule "custom" "block" "geoip:cn" "as_is"
+    db_add_routing_rule "custom" "block" "geosite:tracker" "as_is"
+
+    # 强制刷新 ID，避免菜单/后续逻辑靠 domains 猜
     python3 - "$DB_FILE" <<'PY2'
 import json,sys
 from pathlib import Path
@@ -13250,35 +13267,18 @@ d=json.loads(p.read_text())
 for r in d.get('routing_rules',[]):
     if r.get('domains')=='geosite:cn' and r.get('outbound')=='block':
         r['id']='restrict-cn-geosite'
-        break
-p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
-PY2
-    db_add_routing_rule "custom" "block" "geoip:cn" "as_is"
-    python3 - "$DB_FILE" <<'PY2'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-d=json.loads(p.read_text())
-for r in d.get('routing_rules',[]):
-    if r.get('domains')=='geoip:cn' and r.get('outbound')=='block':
+        r['type']='custom'
+    elif r.get('domains')=='geoip:cn' and r.get('outbound')=='block':
         r['id']='restrict-cn-geoip'
-        break
-p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
-PY2
-    db_add_routing_rule "custom" "block" "geosite:tracker" "as_is"
-    python3 - "$DB_FILE" <<'PY2'
-import json,sys
-from pathlib import Path
-p=Path(sys.argv[1])
-d=json.loads(p.read_text())
-for r in d.get('routing_rules',[]):
-    if r.get('domains')=='geosite:tracker' and r.get('outbound')=='block':
+        r['type']='custom'
+    elif r.get('domains')=='geosite:tracker' and r.get('outbound')=='block':
         r['id']='restrict-btpt-tracker'
-        break
+        r['type']='custom'
 p.write_text(json.dumps(d,ensure_ascii=False,indent=2))
 PY2
+
     _regenerate_proxy_configs
-    _ok "访问限制已启用"
+    _ok "访问限制已启用（最小可用规则集）"
     sleep 1
     return 0
 }

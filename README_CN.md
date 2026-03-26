@@ -18,7 +18,7 @@ Linux 服务器一体化代理部署脚本。
 
 <p>
   <a href="https://www.takehost.biz/" target="_blank" rel="noopener noreferrer">
-    <img src="https://www.takehost.biz/favicon.ico" alt="takehost" width="20" height="20" style="vertical-align: middle; margin-right: 6px;" />
+    <img src="https://www.takehost.biz/favicon.ico" alt="takehost" width="50" height="50" style="vertical-align: middle; margin-right: 6px;" />
     <strong>takehost</strong>
   </a>
   — 提供独立服务器、VPS 和游戏服务器，网络峰值可达 100 Gbps。
@@ -26,7 +26,7 @@ Linux 服务器一体化代理部署脚本。
 
 <p>
   <a href="https://www.vipcloud.cc/aff/QXUUKZSH" target="_blank" rel="noopener noreferrer">
-    <img src="https://www.vipcloud.cc/favicon.ico" alt="VIP Cloud" height="50" style="vertical-align: middle; margin-right: 6px;" />
+    <img src="https://www.vipcloud.cc/favicon.ico" alt="VIP Cloud" width="50" height="50" style="vertical-align: middle; margin-right: 6px;" />
     <strong>VIP Cloud</strong>
   </a>
   — 原生 IP / 解锁流媒体 / 电信 CN2 GIA / 移动 CMIN2 / 三网优化。

@@ -18,7 +18,7 @@ It helps you quickly deploy and manage multiple protocols in one place, includin
 
 <p>
   <a href="https://www.takehost.biz/" target="_blank" rel="noopener noreferrer">
-    <img src="https://www.takehost.biz/favicon.ico" alt="takehost" width="20" height="20" style="vertical-align: middle; margin-right: 6px;" />
+    <img src="https://www.takehost.biz/favicon.ico" alt="takehost" width="50" height="50" style="vertical-align: middle; margin-right: 6px;" />
     <strong>takehost</strong>
   </a>
   — Dedicated servers, VPS, and game servers with up to 100 Gbps networking.
@@ -26,7 +26,7 @@ It helps you quickly deploy and manage multiple protocols in one place, includin
 
 <p>
   <a href="https://www.vipcloud.cc/aff/QXUUKZSH" target="_blank" rel="noopener noreferrer">
-    <img src="https://www.vipcloud.cc/favicon.ico" alt="VIP Cloud" height="50" style="vertical-align: middle; margin-right: 6px;" />
+    <img src="https://www.vipcloud.cc/favicon.ico" alt="VIP Cloud" width="50" height="50" style="vertical-align: middle; margin-right: 6px;" />
     <strong>VIP Cloud</strong>
   </a>
   — Native IP, streaming-unlocked routes, China Telecom CN2 GIA, China Mobile CMIN2, and optimized routing for major Chinese ISPs.

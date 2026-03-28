@@ -1,6 +1,6 @@
 #!/bin/bash 
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.5.2 [服务端]
+#  多协议代理一键部署脚本 v3.5.3 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -17,7 +17,7 @@
 #  项目地址: https://github.com/Zyx0rx/vless-all-in-one
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.5.2"
+readonly VERSION="3.5.3"
 readonly AUTHOR="Zyx0rx"
 readonly REPO_URL="https://github.com/Zyx0rx/vless-all-in-one"
 readonly SCRIPT_REPO="Zyx0rx/vless-all-in-one"
@@ -1371,22 +1371,22 @@ send_expire_warnings() {
 # 安装过期检查 cron job (每天 3:00)
 install_expire_check_cron() {
     local script_path="$0"
-    local cron_cmd="0 3 * * * $script_path --check-expire --notify >/dev/null 2>&1"
+    local cron_cmd="$(build_cron_command "0 3 * * *" "$script_path" "--check-expire --notify" "$CFG/expire.log") # check-expire"
     
     if crontab -l 2>/dev/null | grep -q "check-expire"; then
         _info "过期检查 cron 已存在"
         return 0
     fi
     
-    (crontab -l 2>/dev/null; echo "$cron_cmd") | crontab -
-    [[ $? -eq 0 ]] && _ok "已安装过期检查 cron (每天 3:00)" || _err "安装失败"
+    [[ -n "$(get_bash_interpreter)" ]] || { _err "未找到 bash，无法安装过期检查 cron"; return 1; }
+    install_cron_entry "check-expire" "$cron_cmd" && { _ok "已安装过期检查 cron (每天 3:00)"; echo -e "  ${D}日志: $CFG/expire.log${NC}"; } || _err "安装失败"
 }
 
 # 确保过期检查 cron 已安装（设置到期日期时自动调用）
 # 返回: 0=已存在, 1=新安装成功, 2=安装失败
 ensure_expire_check_cron() {
     local script_path="$(readlink -f "$0" 2>/dev/null || echo "$0")"
-    local cron_cmd="0 3 * * * $script_path --check-expire --notify >/dev/null 2>&1"
+    local cron_cmd="$(build_cron_command "0 3 * * *" "$script_path" "--check-expire --notify" "$CFG/expire.log") # check-expire"
     
     # 如果已存在则跳过
     if crontab -l 2>/dev/null | grep -q "check-expire"; then
@@ -1395,8 +1395,14 @@ ensure_expire_check_cron() {
     fi
     
     # 尝试安装
-    if (crontab -l 2>/dev/null; echo "$cron_cmd") | crontab - 2>/dev/null; then
+    if [[ -z "$(get_bash_interpreter)" ]]; then
+        echo -e "  ${Y}提示: 未找到 bash，无法安装过期检查定时任务${NC}"
+        return 2
+    fi
+
+    if install_cron_entry "check-expire" "$cron_cmd"; then
         echo -e "  ${G}✓ 已自动安装过期检查定时任务 (每天 3:00)${NC}"
+        echo -e "  ${D}日志: $CFG/expire.log${NC}"
         return 1
     else
         echo -e "  ${Y}提示: 过期检查定时任务未安装，可运行: ./vless-server.sh --setup-expire-cron${NC}"
@@ -1406,7 +1412,7 @@ ensure_expire_check_cron() {
 
 # 卸载过期检查 cron
 uninstall_expire_check_cron() {
-    crontab -l 2>/dev/null | grep -v "check-expire" | crontab -
+    remove_cron_entry "check-expire"
     _ok "已移除过期检查 cron"
 }
 
@@ -2240,37 +2246,82 @@ set_traffic_interval() {
     echo "$interval" > "$TRAFFIC_INTERVAL_FILE"
 }
 
+get_bash_interpreter() {
+    local bash_path=""
+    for candidate in "$(command -v bash 2>/dev/null)" /bin/bash /usr/bin/bash /usr/local/bin/bash; do
+        [[ -n "$candidate" && -x "$candidate" ]] || continue
+        bash_path="$candidate"
+        break
+    done
+    echo "$bash_path"
+}
+
+build_cron_command() {
+    local schedule="$1" script_path="$2" subcommand="$3" log_file="$4"
+    local bash_path
+    bash_path=$(get_bash_interpreter)
+    [[ -z "$bash_path" ]] && return 1
+    printf '%s %q %q %s >> %q 2>&1' "$schedule" "$bash_path" "$script_path" "$subcommand" "$log_file"
+}
+
+install_cron_entry() {
+    local tag="$1" cron_cmd="$2"
+    command -v crontab >/dev/null 2>&1 || { _err "crontab 不存在，无法写入定时任务"; return 1; }
+    [[ -n "$cron_cmd" ]] || { _err "定时任务命令为空"; return 1; }
+
+    local current
+    current=$(crontab -l 2>/dev/null || true)
+    if printf '%s\n' "$current" | grep -q "$tag"; then
+        current=$(printf '%s\n' "$current" | grep -v "$tag")
+    fi
+    printf '%s\n%s\n' "$current" "$cron_cmd" | awk 'NF' | crontab -
+}
+
+remove_cron_entry() {
+    local tag="$1"
+    command -v crontab >/dev/null 2>&1 || return 0
+    local current
+    current=$(crontab -l 2>/dev/null || true)
+    printf '%s
+' "$current" | grep -v "$tag" | crontab -
+}
+
 # 创建流量统计定时任务
 setup_traffic_cron() {
     local interval="${1:-$(get_traffic_interval)}"
     local script_path="/usr/local/bin/vless-server.sh"
     [[ -x "$script_path" ]] || script_path=$(readlink -f "$0")
-    local cron_cmd="*/$interval * * * * /bin/bash $script_path --sync-traffic >/dev/null 2>&1"
+    local bash_path log_file cron_cmd
+    bash_path=$(get_bash_interpreter)
+    [[ -x "$script_path" ]] || { _err "脚本不存在或不可执行: $script_path"; return 1; }
+    [[ -n "$bash_path" ]] || { _err "未找到 bash，无法写入流量统计定时任务"; return 1; }
+    log_file="$CFG/traffic-sync.log"
+    cron_cmd="$(build_cron_command "*/$interval * * * *" "$script_path" "--sync-traffic" "$log_file") # sync-traffic"
 
     # 确保 cron 服务已启动
     if [[ "$DISTRO" == "alpine" ]]; then
-        rc-service crond start >/dev/null 2>&1 || true
-        rc-update add crond default >/dev/null 2>&1 || true
+        rc-service cronie start >/dev/null 2>&1 || rc-service crond start >/dev/null 2>&1 || true
+        rc-update add cronie default >/dev/null 2>&1 || rc-update add crond default >/dev/null 2>&1 || true
     elif command -v systemctl >/dev/null 2>&1; then
         systemctl enable cron >/dev/null 2>&1 || systemctl enable crond >/dev/null 2>&1 || true
         systemctl start cron >/dev/null 2>&1 || systemctl start crond >/dev/null 2>&1 || true
     fi
-    
-    # 先移除旧的定时任务
-    crontab -l 2>/dev/null | grep -v "sync-traffic" | crontab - 2>/dev/null
-    
-    # 添加新的定时任务
-    (crontab -l 2>/dev/null; echo "$cron_cmd") | crontab -
-    
-    # 保存间隔设置
-    set_traffic_interval "$interval"
-    
-    _ok "已添加流量统计定时任务 (每${interval}分钟)"
+
+    if install_cron_entry "sync-traffic" "$cron_cmd"; then
+        set_traffic_interval "$interval"
+        _ok "已添加流量统计定时任务 (每${interval}分钟)"
+        echo -e "  ${D}日志: $log_file${NC}"
+        echo -e "  ${D}解释器: $bash_path${NC}"
+    else
+        _err "流量统计定时任务写入失败"
+        echo -e "  ${Y}提示: 可手动执行 ${C}$script_path --sync-traffic${NC} 查看报错${NC}"
+        return 1
+    fi
 }
 
 # 移除流量统计定时任务
 remove_traffic_cron() {
-    crontab -l 2>/dev/null | grep -v "sync-traffic" | crontab -
+    remove_cron_entry "sync-traffic"
     _ok "已移除流量统计定时任务"
 }
 
@@ -14862,6 +14913,35 @@ db_chain_node_exists() {
     [[ -n "$result" && "$result" != "null" ]]
 }
 
+# 重命名链式代理节点
+# 返回: 0=成功, 1=目标名已存在或源不存在, 2=写入失败
+db_rename_chain_node() {
+    local old_name="$1" new_name="$2"
+    [[ -z "$old_name" || -z "$new_name" || "$old_name" == "$new_name" ]] && return 1
+    db_chain_node_exists "$old_name" || return 1
+    if db_chain_node_exists "$new_name"; then
+        return 1
+    fi
+
+    local tmp=$(mktemp)
+    if jq --arg old "$old_name" --arg new "$new_name" '
+        .chain_proxy.nodes = [(.chain_proxy.nodes // [])[] | if .name == $old then .name = $new else . end]
+        | if .chain_proxy.active == $old then .chain_proxy.active = $new else . end
+        | if .routing_rules then
+            .routing_rules = [.routing_rules[] | if .outbound == ("chain:" + $old) then .outbound = ("chain:" + $new) else . end]
+          else . end
+        | if .balancer_groups then
+            .balancer_groups = [.balancer_groups[] | if .nodes then .nodes = [.nodes[] | if . == $old then $new else . end] else . end]
+          else . end
+    ' "$DB_FILE" > "$tmp"; then
+        mv "$tmp" "$DB_FILE"
+        return 0
+    fi
+
+    rm -f "$tmp"
+    return 2
+}
+
 # 解析 host:port 格式（支持 IPv6）
 # 用法: _parse_hostport "hostport_string" 
 # 输出: host|port
@@ -19101,7 +19181,7 @@ do_install_server() {
                 local keys=$(xray x25519 2>/dev/null)
                 [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
                 local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-                local pubkey=$(echo "$keys" | grep "Password:" | awk '{print $2}')
+                local pubkey=$(echo "$keys" | awk -F': *' '/Password( \(PublicKey\))?:|PublicKey:/ {print $2; exit}')
                 [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
                 
                 # 使用统一的证书和 Nginx 配置函数
@@ -19164,7 +19244,7 @@ do_install_server() {
                 local keys=$(xray x25519 2>/dev/null)
                 [[ -z "$keys" ]] && { _err "密钥生成失败"; _pause; return 1; }
                 local privkey=$(echo "$keys" | grep "PrivateKey:" | awk '{print $2}')
-                local pubkey=$(echo "$keys" | grep "Password:" | awk '{print $2}')
+                local pubkey=$(echo "$keys" | awk -F': *' '/Password( \(PublicKey\))?:|PublicKey:/ {print $2; exit}')
                 [[ -z "$privkey" || -z "$pubkey" ]] && { _err "密钥提取失败"; _pause; return 1; }
                 
                 # 使用统一的证书和 Nginx 配置函数
@@ -21174,6 +21254,18 @@ external_link_to_surge() {
     esac
 }
 
+# 设置/替换分享链接名称
+set_link_name() {
+    local link="$1" new_name="$2"
+    local base="${link%%#*}"
+    [[ -z "$new_name" ]] && { echo "$base"; return 0; }
+    python3 - "$base" "$new_name" <<'PYEOF'
+import sys, urllib.parse
+base, name = sys.argv[1], sys.argv[2]
+print(base + '#' + urllib.parse.quote(name, safe=''))
+PYEOF
+}
+
 # 添加分享链接
 add_external_link() {
     echo ""
@@ -21183,30 +21275,32 @@ add_external_link() {
     _line
     echo ""
     read -rp "  请输入分享链接: " link
-    
+
     [[ -z "$link" ]] && return
-    
+
     # 验证链接格式
     if [[ "$link" != *"://"* ]]; then
         _err "无效的链接格式"
         return 1
     fi
-    
+
+    local name=$(get_link_name "$link")
+    echo -e "  ${D}直接回车保留原名称，或输入新名称${NC}"
+    read -rp "  节点名称 [$name]: " custom_name
+    [[ -n "$custom_name" ]] && link="$(set_link_name "$link" "$custom_name")" && name="$custom_name"
+
     # 检查是否已存在
     if [[ -f "$EXTERNAL_LINKS_FILE" ]] && grep -qF "$link" "$EXTERNAL_LINKS_FILE"; then
         _warn "该链接已存在"
         return 1
     fi
-    
-    # 解析获取名称
-    local name=$(get_link_name "$link")
-    
+
     # 保存
     mkdir -p "$(dirname "$EXTERNAL_LINKS_FILE")"
     echo "$link" >> "$EXTERNAL_LINKS_FILE"
-    
+
     _ok "已添加节点: $name"
-    
+
     # 自动更新订阅文件
     if [[ -f "$CFG/sub.info" ]]; then
         generate_sub_files
@@ -21311,6 +21405,62 @@ show_external_nodes() {
     _line
 }
 
+# 重命名外部节点
+rename_external_node() {
+    [[ -f "$EXTERNAL_LINKS_FILE" ]] || { _warn "没有可重命名的分享链接节点"; return; }
+
+    echo ""
+    _line
+    echo -e "  ${W}重命名外部节点${NC}"
+    _line
+
+    mapfile -t links < <(grep -v '^\s*#' "$EXTERNAL_LINKS_FILE" 2>/dev/null | sed '/^\s*$/d')
+    [[ ${#links[@]} -gt 0 ]] || { _warn "没有可重命名的分享链接节点"; return; }
+
+    local i=0
+    for link in "${links[@]}"; do
+        ((i++))
+        echo -e "  ${G}$i)${NC} [${link%%://*}] $(get_link_name "$link")"
+    done
+
+    echo ""
+    local rename_idx old_link old_name new_name new_link
+    read -rp "  输入序号重命名 (0 取消): " rename_idx
+    [[ "$rename_idx" == "0" || -z "$rename_idx" ]] && return
+    [[ "$rename_idx" =~ ^[0-9]+$ ]] || { _err "无效序号"; return; }
+    (( rename_idx >= 1 && rename_idx <= ${#links[@]} )) || { _err "无效序号"; return; }
+
+    old_link="${links[$((rename_idx-1))]}"
+    old_name=$(get_link_name "$old_link")
+    read -rp "  新名称 [$old_name]: " new_name
+    new_name="${new_name:-$old_name}"
+    [[ "$new_name" == "$old_name" ]] && { _info "名称未变更"; return; }
+
+    new_link=$(set_link_name "$old_link" "$new_name")
+    python3 - "$EXTERNAL_LINKS_FILE" "$old_link" "$new_link" <<'PYEOF'
+from pathlib import Path
+import sys
+path=Path(sys.argv[1])
+old=sys.argv[2]
+new=sys.argv[3]
+lines=path.read_text().splitlines()
+replaced=False
+out=[]
+for line in lines:
+    if not replaced and line == old:
+        out.append(new)
+        replaced=True
+    else:
+        out.append(line)
+path.write_text(chr(10).join(out) + (chr(10) if out else ""))
+print('ok' if replaced else 'missing')
+PYEOF
+    [[ $? -eq 0 ]] || { _err "重命名失败"; return; }
+
+    _ok "已重命名: $old_name -> $new_name"
+    [[ -f "$CFG/sub.info" ]] && generate_sub_files
+}
+
 # 删除外部节点
 delete_external_node() {
     echo ""
@@ -21384,8 +21534,9 @@ manage_external_nodes() {
         _item "1" "添加分享链接"
         _item "2" "添加订阅链接"
         _item "3" "查看外部节点"
-        _item "4" "删除外部节点"
-        _item "5" "刷新订阅"
+        _item "4" "重命名外部节点"
+        _item "5" "删除外部节点"
+        _item "6" "刷新订阅"
         _line
         _item "0" "返回"
         _line
@@ -21396,8 +21547,9 @@ manage_external_nodes() {
             1) add_external_link ;;
             2) add_external_sub ;;
             3) show_external_nodes ;;
-            4) delete_external_node ;;
-            5) refresh_external_subs ;;
+            4) rename_external_node ;;
+            5) delete_external_node ;;
+            6) refresh_external_subs ;;
             0|"") return ;;
             *) _err "无效选择" ;;
         esac
